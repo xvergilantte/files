@@ -1,0 +1,57 @@
+From 962d984ab1860ff29a2d8c4d78070ffc45d5eeca Mon Sep 17 00:00:00 2001
+From: vergilantte <xvergilantte@gmail.com>
+Date: Mon, 9 Feb 2026 08:55:36 +0700
+Subject: [PATCH] Revert "msm: camera: Use boot clock for recording start time"
+
+This reverts commit 9c63213ba655b09c6bfa634be3b2606ac5380c6c.
+
+Revert "msm: camera: isp: Use boot clock for recording start time"
+
+This reverts commit 6a56de2c691d4d35c102033594e891b7ffeb862b.
+
+Signed-off-by: vergilantte <xvergilantte@gmail.com>
+---
+ .../cam_isp/isp_hw_mgr/isp_hw/ife_csid_hw/cam_ife_csid_core.c   | 2 +-
+ .../msm/camera/cam_isp/isp_hw_mgr/isp_hw/vfe_hw/cam_vfe_core.c  | 2 +-
+ drivers/media/platform/msm/camera/cam_utils/cam_common_util.c   | 2 +-
+ 3 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/platform/msm/camera/cam_isp/isp_hw_mgr/isp_hw/ife_csid_hw/cam_ife_csid_core.c b/drivers/media/platform/msm/camera/cam_isp/isp_hw_mgr/isp_hw/ife_csid_hw/cam_ife_csid_core.c
+index b363ffe087b8..5cbbd9260c50 100644
+--- a/drivers/media/platform/msm/camera/cam_isp/isp_hw_mgr/isp_hw/ife_csid_hw/cam_ife_csid_core.c
++++ b/drivers/media/platform/msm/camera/cam_isp/isp_hw_mgr/isp_hw/ife_csid_hw/cam_ife_csid_core.c
+@@ -2584,7 +2584,7 @@ static int cam_ife_csid_get_time_stamp(
+ 		CAM_IFE_CSID_QTIMER_DIV_FACTOR);
+ 
+ 	if (!csid_hw->prev_boot_timestamp) {
+-		ktime_get_ts64(&ts);
++		get_monotonic_boottime64(&ts);
+ 		time_stamp->boot_timestamp =
+ 			(uint64_t)((ts.tv_sec * 1000000000) +
+ 			ts.tv_nsec);
+diff --git a/drivers/media/platform/msm/camera/cam_isp/isp_hw_mgr/isp_hw/vfe_hw/cam_vfe_core.c b/drivers/media/platform/msm/camera/cam_isp/isp_hw_mgr/isp_hw/vfe_hw/cam_vfe_core.c
+index 2c3ce2022403..19c73f06c49f 100644
+--- a/drivers/media/platform/msm/camera/cam_isp/isp_hw_mgr/isp_hw/vfe_hw/cam_vfe_core.c
++++ b/drivers/media/platform/msm/camera/cam_isp/isp_hw_mgr/isp_hw/vfe_hw/cam_vfe_core.c
+@@ -436,7 +436,7 @@ void cam_isp_hw_get_timestamp(struct cam_isp_timestamp *time_stamp)
+ {
+ 	struct timespec ts;
+ 
+-	ktime_get_ts(&ts);
++	get_monotonic_boottime(&ts);
+ 	time_stamp->mono_time.tv_sec    = ts.tv_sec;
+ 	time_stamp->mono_time.tv_usec   = ts.tv_nsec/1000;
+ 	time_stamp->time_usecs =  ts.tv_sec * 1000000 +
+diff --git a/drivers/media/platform/msm/camera/cam_utils/cam_common_util.c b/drivers/media/platform/msm/camera/cam_utils/cam_common_util.c
+index 11009d433a41..fd113aeb1dc5 100644
+--- a/drivers/media/platform/msm/camera/cam_utils/cam_common_util.c
++++ b/drivers/media/platform/msm/camera/cam_utils/cam_common_util.c
+@@ -69,7 +69,7 @@ void cam_common_util_get_curr_timestamp(struct timeval *time_stamp)
+ {
+ 	struct timespec ts;
+ 
+-	ktime_get_ts(&ts);
++	get_monotonic_boottime(&ts);
+ 	time_stamp->tv_sec    = ts.tv_sec;
+ 	time_stamp->tv_usec   = ts.tv_nsec/1000;
+ }
