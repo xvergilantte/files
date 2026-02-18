@@ -1,0 +1,1378 @@
+From 2e945f4c79061599299bb1e1565b4071a38cf7eb Mon Sep 17 00:00:00 2001
+From: xve001 <xxve001@gmail.com>
+Date: Fri, 24 Oct 2025 09:26:16 +0700
+Subject: [PATCH] drivers: miui display feature v2
+
+Signed-off-by: xve001 <xxve001@gmail.com>
+Signed-off-by: vergilantte <xvergilantte@gmail.com>
+---
+ .../dsi-panel-nt36672c-huaxing-fhd-video.dtsi |   4 +-
+ drivers/gpu/drm/drm_bridge.c                  |  38 ++
+ drivers/gpu/drm/drm_sysfs.c                   |  91 ++++
+ drivers/gpu/drm/msm/dsi-staging/dsi_defs.h    |  47 ++
+ drivers/gpu/drm/msm/dsi-staging/dsi_display.c |  82 +++
+ drivers/gpu/drm/msm/dsi-staging/dsi_drm.c     |  71 +++
+ drivers/gpu/drm/msm/dsi-staging/dsi_panel.c   | 472 ++++++++++++++++++
+ drivers/gpu/drm/msm/dsi-staging/dsi_panel.h   |  16 +
+ .../gpu/drm/msm/dsi-staging/dsi_panel_mi.h    | 123 +++++
+ drivers/gpu/drm/msm/sde/sde_crtc.c            |  54 ++
+ drivers/input/input.c                         |   2 +
+ include/drm/drm_bridge.h                      |   3 +
+ include/uapi/drm/msm_drm.h                    |   1 +
+ 13 files changed, 1002 insertions(+), 2 deletions(-)
+ create mode 100644 drivers/gpu/drm/msm/dsi-staging/dsi_panel_mi.h
+
+diff --git a/arch/arm64/boot/dts/qcom/dsi-panel-nt36672c-huaxing-fhd-video.dtsi b/arch/arm64/boot/dts/qcom/dsi-panel-nt36672c-huaxing-fhd-video.dtsi
+index 97b59eaa9701..5b8d4855d1ab 100644
+--- a/arch/arm64/boot/dts/qcom/dsi-panel-nt36672c-huaxing-fhd-video.dtsi
++++ b/arch/arm64/boot/dts/qcom/dsi-panel-nt36672c-huaxing-fhd-video.dtsi
+@@ -276,8 +276,8 @@
+ 				//coordinate
+ 				qcom,mdss-dsi-panel-xy-coordinate = <0x0F 0x18>;
+ 				qcom,mdss-dsi-dispparam-xy-coordinate-command = [
+-					15 01 00 00 00 00 02 FF 10
+-					06 01 00 01 00 00 01 A1
++					15 01 00 00 00 00 02 FF 20
++					06 01 00 01 05 00 02 A1 00
+ 				];
+ 				qcom,mdss-dsi-dispparam-xy-coordinate-command-state = "dsi_hs_mode";
+ 
+diff --git a/drivers/gpu/drm/drm_bridge.c b/drivers/gpu/drm/drm_bridge.c
+index 8feefa818334..5b2f83af3b81 100644
+--- a/drivers/gpu/drm/drm_bridge.c
++++ b/drivers/gpu/drm/drm_bridge.c
+@@ -369,6 +369,44 @@ void drm_bridge_pre_enable(struct drm_bridge *bridge)
+ }
+ EXPORT_SYMBOL(drm_bridge_pre_enable);
+ 
++void drm_bridge_disp_param_set(struct drm_bridge *bridge, int cmd)
++{
++	if (!bridge)
++		return;
++
++	drm_bridge_disp_param_set(bridge->next, cmd);
++
++	if (bridge->funcs->disp_param_set)
++		bridge->funcs->disp_param_set(bridge, cmd);
++}
++ssize_t drm_bridge_disp_param_get(struct drm_bridge *bridge, char *pbuf)
++{
++	ssize_t ret = 0;
++
++	if (!bridge)
++		return 0;
++
++	ret = drm_bridge_disp_param_get(bridge->next, pbuf);
++
++	if (bridge->funcs->disp_param_get)
++		ret = bridge->funcs->disp_param_get(bridge, pbuf);
++	return ret;
++}
++EXPORT_SYMBOL(drm_bridge_disp_param_get);
++
++int drm_get_panel_info(struct drm_bridge *bridge, char *buf)
++{
++	int rc = 0;
++	if (!bridge)
++		return rc;
++
++	if (bridge->funcs->disp_get_panel_info)
++		return bridge->funcs->disp_get_panel_info(bridge, buf);
++
++	return rc;
++}
++EXPORT_SYMBOL(drm_get_panel_info);
++
+ /**
+  * drm_bridge_enable - enables all bridges in the encoder chain
+  * @bridge: bridge control structure
+diff --git a/drivers/gpu/drm/drm_sysfs.c b/drivers/gpu/drm/drm_sysfs.c
+index 1c5b5ce1fd7f..2bb2b721d301 100644
+--- a/drivers/gpu/drm/drm_sysfs.c
++++ b/drivers/gpu/drm/drm_sysfs.c
+@@ -18,6 +18,7 @@
+ #include <linux/err.h>
+ #include <linux/export.h>
+ 
++#include <drm/drm_encoder.h>
+ #include <drm/drm_sysfs.h>
+ #include <drm/drmP.h>
+ #include "drm_internal.h"
+@@ -229,16 +230,106 @@ static ssize_t modes_show(struct device *device,
+ 	return written;
+ }
+ 
++extern int drm_get_panel_info(struct drm_bridge *bridge, char *name);
++static ssize_t panel_info_show(struct device *device,
++			    struct device_attribute *attr,
++			   char *buf)
++{
++	int written = 0;
++	char pname[128] = {0};
++	struct drm_connector *connector = NULL;
++	struct drm_encoder *encoder = NULL;
++	struct drm_bridge *bridge = NULL;
++
++	connector = to_drm_connector(device);
++	if (!connector)
++		return written;
++
++	encoder = connector->encoder;
++	if (!encoder)
++		return written;
++
++	bridge = encoder->bridge;
++	if (!bridge)
++		return written;
++
++	written = drm_get_panel_info(bridge, pname);
++	if (written)
++		return snprintf(buf, PAGE_SIZE, "panel_name=%s\n", pname);
++
++	return written;
++}
++
++void drm_bridge_disp_param_set(struct drm_bridge *bridge, int cmd);
++static ssize_t disp_param_store(struct device *device,
++    struct device_attribute *attr,
++	const char *buf, size_t count)
++{
++	int param;
++	struct drm_connector *connector = NULL;
++	struct drm_encoder *encoder = NULL;
++	struct drm_bridge *bridge = NULL;
++
++	if (!device)
++		return count;
++
++	connector = to_drm_connector(device);
++	if (!connector)
++		return count;
++
++	encoder = connector->encoder;
++	if (!encoder)
++		return count;
++
++	bridge = encoder->bridge;
++	if (!bridge)
++		return count;
++	sscanf(buf, "0x%x", &param);
++
++	drm_bridge_disp_param_set(bridge, param);
++
++	return count;
++}
++
++ssize_t drm_bridge_disp_param_get(struct drm_bridge *bridge, char *pbuf);
++static ssize_t disp_param_show(struct device *device,
++			   struct device_attribute *attr,
++   			   char *buf)
++{
++   	ssize_t ret = 0;
++	struct drm_connector *connector = NULL;
++	struct drm_encoder *encoder = NULL;
++	struct drm_bridge *bridge = NULL;
++
++	connector = to_drm_connector(device);
++	if (!connector)
++		return ret;
++
++	encoder = connector->encoder;
++	if (!encoder)
++		return ret;
++
++	bridge = encoder->bridge;
++	if (!bridge)
++		return ret;
++	ret = drm_bridge_disp_param_get(bridge, buf);
++	return ret;
++}
++
+ static DEVICE_ATTR_RW(status);
+ static DEVICE_ATTR_RO(enabled);
++static DEVICE_ATTR_RW(disp_param);
+ static DEVICE_ATTR_RO(dpms);
+ static DEVICE_ATTR_RO(modes);
++static DEVICE_ATTR_RO(panel_info);
+ 
+ static struct attribute *connector_dev_attrs[] = {
+ 	&dev_attr_status.attr,
+ 	&dev_attr_enabled.attr,
++	&dev_attr_disp_param.attr,
+ 	&dev_attr_dpms.attr,
+ 	&dev_attr_modes.attr,
++	&dev_attr_panel_info.attr,
+ 	NULL
+ };
+ 
+diff --git a/drivers/gpu/drm/msm/dsi-staging/dsi_defs.h b/drivers/gpu/drm/msm/dsi-staging/dsi_defs.h
+index cb78495861da..da8da0c88257 100644
+--- a/drivers/gpu/drm/msm/dsi-staging/dsi_defs.h
++++ b/drivers/gpu/drm/msm/dsi-staging/dsi_defs.h
+@@ -302,10 +302,55 @@ enum dsi_cmd_set_type {
+ 	DSI_CMD_SET_LP1,
+ 	DSI_CMD_SET_LP2,
+ 	DSI_CMD_SET_NOLP,
++	DSI_CMD_SET_DOZE_HBM,
++	DSI_CMD_SET_DOZE_LBM,
+ 	DSI_CMD_SET_PPS,
+ 	DSI_CMD_SET_ROI,
+ 	DSI_CMD_SET_TIMING_SWITCH,
+ 	DSI_CMD_SET_POST_TIMING_SWITCH,
++	DSI_CMD_SET_ELVSS_DIMMING_OFFSET,
++	DSI_CMD_SET_ELVSS_DIMMING_READ,
++	DSI_CMD_SET_DISP_WARM,
++	DSI_CMD_SET_DISP_DEFAULT,
++	DSI_CMD_SET_DISP_COLD,
++	DSI_CMD_SET_DISP_PAPER,
++	DSI_CMD_SET_DISP_PAPER1,
++	DSI_CMD_SET_DISP_PAPER2,
++	DSI_CMD_SET_DISP_PAPER3,
++	DSI_CMD_SET_DISP_PAPER4,
++	DSI_CMD_SET_DISP_PAPER5,
++	DSI_CMD_SET_DISP_PAPER6,
++	DSI_CMD_SET_DISP_PAPER7,
++	DSI_CMD_SET_DISP_NORMAL1,
++	DSI_CMD_SET_DISP_NORMAL2,
++	DSI_CMD_SET_DISP_SRGB,
++	DSI_CMD_SET_DISP_CEON,
++	DSI_CMD_SET_DISP_CEOFF,
++	DSI_CMD_SET_DISP_CABCUION,
++	DSI_CMD_SET_DISP_CABCSTILLON,
++	DSI_CMD_SET_DISP_CABCMOVIEON,
++	DSI_CMD_SET_DISP_CABCOFF,
++	DSI_CMD_SET_DISP_SKINCE_CABCUION,
++	DSI_CMD_SET_DISP_SKINCE_CABCSTILLON,
++	DSI_CMD_SET_DISP_SKINCE_CABCMOVIEON,
++	DSI_CMD_SET_DISP_SKINCE_CABCOFF,
++	DSI_CMD_SET_DISP_DIMMINGON,
++	DSI_CMD_SET_DISP_DIMMINGOFF,
++	DSI_CMD_SET_DISP_ACL_OFF,
++	DSI_CMD_SET_DISP_ACL_L1,
++	DSI_CMD_SET_DISP_ACL_L2,
++	DSI_CMD_SET_DISP_ACL_L3,
++	DSI_CMD_SET_DISP_HBM_ON,
++	DSI_CMD_SET_DISP_HBM_OFF,
++	DSI_CMD_SET_DISP_HBM_FOD_ON,
++	DSI_CMD_SET_DISP_HBM_FOD_OFF,
++	DSI_CMD_SET_DISP_HBM_FOD2NORM,
++	DSI_CMD_SET_DISP_OFF_MODE,
++	DSI_CMD_SET_DISP_ON_MODE,
++	DSI_CMD_SET_READ_XY_COORDINATE,
++	DSI_CMD_SET_READ_BRIGHTNESS,
++	DSI_CMD_SET_READ_MAX_LUMINANCE,
++	DSI_CMD_SET_MAX_LUMINANCE_VALID,
+ 	DSI_CMD_SET_QSYNC_ON,
+ 	DSI_CMD_SET_QSYNC_OFF,
+ 	DSI_CMD_SET_DISP_LCD_HBM_L1_ON,
+@@ -315,6 +360,8 @@ enum dsi_cmd_set_type {
+ 	DSI_CMD_SET_DISP_CABC_STILL_ON,
+ 	DSI_CMD_SET_DISP_CABC_MOVIE_ON,
+ 	DSI_CMD_SET_DISP_CABC_OFF,
++	DSI_CMD_SET_DISP_CRC_DCIP3,
++	DSI_CMD_SET_DISP_CRC_OFF,
+ 	DSI_CMD_SET_MAX
+ };
+ 
+diff --git a/drivers/gpu/drm/msm/dsi-staging/dsi_display.c b/drivers/gpu/drm/msm/dsi-staging/dsi_display.c
+index 8206d38f4826..1601e7400f69 100644
+--- a/drivers/gpu/drm/msm/dsi-staging/dsi_display.c
++++ b/drivers/gpu/drm/msm/dsi-staging/dsi_display.c
+@@ -49,6 +49,7 @@
+ 
+ DEFINE_MUTEX(dsi_display_clk_mutex);
+ 
++char g_lcd_id_mi[64];
+ static char dsi_display_primary[MAX_CMDLINE_PARAM_LEN];
+ static char dsi_display_secondary[MAX_CMDLINE_PARAM_LEN];
+ static struct dsi_display_boot_param boot_displays[MAX_DSI_ACTIVE_DISPLAY] = {
+@@ -858,6 +859,87 @@ int dsi_display_check_status(struct drm_connector *connector, void *display,
+ 	return rc;
+ }
+ 
++int dsi_display_read_panel(struct dsi_panel *panel, struct dsi_read_config *read_config)
++{
++	struct mipi_dsi_host *host;
++	struct dsi_display *display;
++	struct dsi_display_ctrl *ctrl;
++	struct dsi_cmd_desc *cmds;
++	int i, rc = 0, count = 0;
++	u32 flags = 0;
++
++	if (panel == NULL || read_config == NULL)
++		return -EINVAL;
++
++	host = panel->host;
++	if (host) {
++		display = to_dsi_display(host);
++		if (display == NULL)
++			return -EINVAL;
++	} else
++		return -EINVAL;
++
++	if (!panel->panel_initialized) {
++		pr_info("Panel not initialized\n");
++		return -EINVAL;
++	}
++
++	if (!read_config->enabled) {
++		pr_info("read operation was not permitted\n");
++		return -EPERM;
++	}
++
++	dsi_display_clk_ctrl(display->dsi_clk_handle,
++		DSI_ALL_CLKS, DSI_CLK_ON);
++
++	ctrl = &display->ctrl[display->cmd_master_idx];
++
++	rc = dsi_display_cmd_engine_enable(display);
++	if (rc) {
++		pr_err("cmd engine enable failed\n");
++		rc = -EPERM;
++		goto exit_ctrl;
++	}
++
++	if (display->tx_cmd_buf == NULL) {
++		rc = dsi_host_alloc_cmd_tx_buffer(display);
++		if (rc) {
++			pr_err("failed to allocate cmd tx buffer memory\n");
++			goto exit;
++		}
++	}
++
++	count = read_config->read_cmd.count;
++	cmds = read_config->read_cmd.cmds;
++	if (cmds->last_command) {
++		cmds->msg.flags |= MIPI_DSI_MSG_LASTCOMMAND;
++		flags |= DSI_CTRL_CMD_LAST_COMMAND;
++	}
++	flags |= (DSI_CTRL_CMD_FETCH_MEMORY | DSI_CTRL_CMD_READ);
++
++	memset(read_config->rbuf, 0x0, sizeof(read_config->rbuf));
++	cmds->msg.rx_buf = read_config->rbuf;
++	cmds->msg.rx_len = read_config->cmds_rlen;
++
++	rc = dsi_ctrl_cmd_transfer(ctrl->ctrl, &(cmds->msg), flags);
++	if (rc <= 0) {
++		pr_err("rx cmd transfer failed rc=%d\n", rc);
++		goto exit;
++	}
++
++	for (i = 0; i < read_config->cmds_rlen; i++) //debug
++		pr_info("0x%x ", read_config->rbuf[i]);
++	pr_info("\n");
++
++exit:
++	dsi_display_cmd_engine_disable(display);
++exit_ctrl:
++	dsi_display_clk_ctrl(display->dsi_clk_handle,
++		DSI_ALL_CLKS, DSI_CLK_OFF);
++
++	return rc;
++}
++
+ static int dsi_display_cmd_prepare(const char *cmd_buf, u32 cmd_buf_len,
+ 		struct dsi_cmd_desc *cmd, u8 *payload, u32 payload_len)
+ {
+diff --git a/drivers/gpu/drm/msm/dsi-staging/dsi_drm.c b/drivers/gpu/drm/msm/dsi-staging/dsi_drm.c
+index 3ac96d033915..3d3b5fefe8d4 100644
+--- a/drivers/gpu/drm/msm/dsi-staging/dsi_drm.c
++++ b/drivers/gpu/drm/msm/dsi-staging/dsi_drm.c
+@@ -304,6 +304,74 @@ int dsi_bridge_interface_enable(int timeout)
+ }
+ EXPORT_SYMBOL(dsi_bridge_interface_enable);
+ 
++int panel_disp_param_send(struct dsi_display *display, int cmd);
++static void dsi_bridge_disp_param_set(struct drm_bridge *bridge, int cmd)
++{
++	int rc = 0;
++	struct dsi_bridge *c_bridge;
++
++	if (!bridge) {
++		pr_err("Invalid params\n");
++		return;
++	}
++
++	c_bridge = to_dsi_bridge(bridge);
++
++	SDE_ATRACE_BEGIN("panel_disp_param_send");
++	rc = panel_disp_param_send(c_bridge->display, cmd);
++	if (rc) {
++		pr_err("[%d] DSI disp param send failed, rc=%d\n",
++		       c_bridge->id, rc);
++	}
++	SDE_ATRACE_END("panel_disp_param_send");
++}
++
++static ssize_t dsi_bridge_disp_param_get(struct drm_bridge *bridge, char *buf)
++{
++	struct dsi_bridge *c_bridge;
++	struct dsi_display *display;
++	struct dsi_panel *panel;
++	ssize_t ret = 0;
++
++	if (!bridge) {
++		pr_err("Invalid params\n");
++		return 0;
++	} else {
++		SDE_ATRACE_BEGIN("panel_disp_param_get");
++		c_bridge = to_dsi_bridge(bridge);
++		if(c_bridge == NULL)
++			return 0;
++		display = c_bridge->display;
++		if(display == NULL)
++			return 0;
++		panel = display->panel;
++		if (panel) {
++			ret = strlen(panel->panel_read_data);
++			ret = ret > 255 ? 255 : ret;
++			if (ret > 0)
++				memcpy(buf, panel->panel_read_data, ret);
++		}
++		SDE_ATRACE_END("panel_disp_param_get");
++	}
++	return ret;
++}
++
++static int dsi_bridge_get_panel_info(struct drm_bridge *bridge, char *buf)
++{
++	int rc = 0;
++	struct dsi_bridge *c_bridge = to_dsi_bridge(bridge);
++
++	if (!c_bridge) {
++		pr_err("Invalid params\n");
++		return rc;
++	}
++
++	if (c_bridge->display->name)
++		return snprintf(buf, PAGE_SIZE, c_bridge->display->name);
++
++	return rc;
++}
++
+ static void dsi_bridge_enable(struct drm_bridge *bridge)
+ {
+ 	int rc = 0;
+@@ -653,6 +721,9 @@ static const struct drm_bridge_funcs dsi_bridge_ops = {
+ 	.disable      = dsi_bridge_disable,
+ 	.post_disable = dsi_bridge_post_disable,
+ 	.mode_set     = dsi_bridge_mode_set,
++	.disp_param_set = dsi_bridge_disp_param_set,
++	.disp_param_get = dsi_bridge_disp_param_get,
++	.disp_get_panel_info = dsi_bridge_get_panel_info,
+ };
+ 
+ int dsi_conn_set_info_blob(struct drm_connector *connector,
+diff --git a/drivers/gpu/drm/msm/dsi-staging/dsi_panel.c b/drivers/gpu/drm/msm/dsi-staging/dsi_panel.c
+index 305f4a609146..1387b5fe07ce 100644
+--- a/drivers/gpu/drm/msm/dsi-staging/dsi_panel.c
++++ b/drivers/gpu/drm/msm/dsi-staging/dsi_panel.c
+@@ -21,8 +21,10 @@
+ #include <video/mipi_display.h>
+ 
+ #include "dsi_panel.h"
++#include "dsi_display.h"
+ #include "dsi_ctrl_hw.h"
+ #include "dsi_parser.h"
++#include "dsi_panel_mi.h"
+ 
+ /**
+  * topology is currently defined by a set of following 3 values:
+@@ -44,6 +46,10 @@
+ #define DEFAULT_PANEL_PREFILL_LINES	25
+ #define TICKS_IN_MICRO_SECOND		1000000
+ 
++extern char g_lcd_id_mi[64];
++static int panel_disp_param_send_lock(struct dsi_panel *panel, int param);
++int dsi_display_read_panel(struct dsi_panel *panel, struct dsi_read_config *read_config);
++
+ enum dsi_dsc_ratio_type {
+ 	DSC_8BPC_8BPP,
+ 	DSC_10BPC_8BPP,
+@@ -1762,10 +1768,55 @@ const char *cmd_set_prop_map[DSI_CMD_SET_MAX] = {
+ 	"qcom,mdss-dsi-lp1-command",
+ 	"qcom,mdss-dsi-lp2-command",
+ 	"qcom,mdss-dsi-nolp-command",
++	"qcom,mdss-dsi-doze-hbm-command",
++	"qcom,mdss-dsi-doze-lbm-command",
+ 	"PPS not parsed from DTSI, generated dynamically",
+ 	"ROI not parsed from DTSI, generated dynamically",
+ 	"qcom,mdss-dsi-timing-switch-command",
+ 	"qcom,mdss-dsi-post-mode-switch-on-command",
++	"qcom,mdss-dsi-dispparam-elvss-dimming-offset-command",
++	"qcom,mdss-dsi-dispparam-elvss-dimming-read-command",
++	"qcom,mdss-dsi-dispparam-warm-command",
++	"qcom,mdss-dsi-dispparam-default-command",
++	"qcom,mdss-dsi-dispparam-cold-command",
++	"qcom,mdss-dsi-dispparam-papermode-command",
++	"qcom,mdss-dsi-dispparam-papermode1-command",
++	"qcom,mdss-dsi-dispparam-papermode2-command",
++	"qcom,mdss-dsi-dispparam-papermode3-command",
++	"qcom,mdss-dsi-dispparam-papermode4-command",
++	"qcom,mdss-dsi-dispparam-papermode5-command",
++	"qcom,mdss-dsi-dispparam-papermode6-command",
++	"qcom,mdss-dsi-dispparam-papermode7-command",
++	"qcom,mdss-dsi-dispparam-normal1-command",
++	"qcom,mdss-dsi-dispparam-normal2-command",
++	"qcom,mdss-dsi-dispparam-srgb-command",
++	"qcom,mdss-dsi-dispparam-ceon-command",
++	"qcom,mdss-dsi-dispparam-ceoff-command",
++	"qcom,mdss-dsi-dispparam-cabcuion-command",
++	"qcom,mdss-dsi-dispparam-cabcstillon-command",
++	"qcom,mdss-dsi-dispparam-cabcmovieon-command",
++	"qcom,mdss-dsi-dispparam-cabcoff-command",
++	"qcom,mdss-dsi-dispparam-skince-cabcuion-command",
++	"qcom,mdss-dsi-dispparam-skince-cabcstillon-command",
++	"qcom,mdss-dsi-dispparam-skince-cabcmovieon-command",
++	"qcom,mdss-dsi-dispparam-skince-cabcoff-command",
++	"qcom,mdss-dsi-dispparam-dimmingon-command",
++	"qcom,mdss-dsi-dispparam-dimmingoff-command",
++	"qcom,mdss-dsi-dispparam-acl-off-command",
++	"qcom,mdss-dsi-dispparam-acl-l1-command",
++	"qcom,mdss-dsi-dispparam-acl-l2-command",
++	"qcom,mdss-dsi-dispparam-acl-l3-command",
++	"qcom,mdss-dsi-dispparam-hbm-on-command",
++	"qcom,mdss-dsi-dispparam-hbm-off-command",
++	"qcom,mdss-dsi-dispparam-hbm-fod-on-command",
++	"qcom,mdss-dsi-dispparam-hbm-fod-off-command",
++	"qcom,mdss-dsi-dispparam-hbm-fod2norm-command",
++	"qcom,mdss-dsi-displayoff-command",
++	"qcom,mdss-dsi-displayon-command",
++	"qcom,mdss-dsi-dispparam-xy-coordinate-command",
++	"qcom,mdss-dsi-read-brightness-command",
++	"qcom,mdss-dsi-dispparam-max-luminance-command",
++	"qcom,mdss-dsi-dispparam-max-luminance-valid-command",
+ 	"qcom,mdss-dsi-qsync-on-commands",
+ 	"qcom,mdss-dsi-qsync-off-commands",
+ 	"qcom,mdss-dsi-dispparam-lcd-hbm-l1-on-command",
+@@ -1775,6 +1826,8 @@ const char *cmd_set_prop_map[DSI_CMD_SET_MAX] = {
+ 	"qcom,mdss-dsi-dispparam-cabcstillon-command",
+ 	"qcom,mdss-dsi-dispparam-cabcmovieon-command",
+ 	"qcom,mdss-dsi-dispparam-cabcoff-command",
++	"qcom,mdss-dsi-dispparam-crc-dcip3-on-command",
++	"qcom,mdss-dsi-dispparam-crc-off-command",
+ };
+ 
+ const char *cmd_set_state_map[DSI_CMD_SET_MAX] = {
+@@ -1795,10 +1848,55 @@ const char *cmd_set_state_map[DSI_CMD_SET_MAX] = {
+ 	"qcom,mdss-dsi-lp1-command-state",
+ 	"qcom,mdss-dsi-lp2-command-state",
+ 	"qcom,mdss-dsi-nolp-command-state",
++	"qcom,mdss-dsi-doze-hbm-command-state",
++	"qcom,mdss-dsi-doze-lbm-command-state",
+ 	"PPS not parsed from DTSI, generated dynamically",
+ 	"ROI not parsed from DTSI, generated dynamically",
+ 	"qcom,mdss-dsi-timing-switch-command-state",
+ 	"qcom,mdss-dsi-post-mode-switch-on-command-state",
++	"qcom,mdss-dsi-dispparam-elvss-dimming-offset-command-state",
++	"qcom,mdss-dsi-dispparam-elvss-dimming-read-command-state",
++	"qcom,mdss-dsi-dispparam-warm-command-state",
++	"qcom,mdss-dsi-dispparam-default-command-state",
++	"qcom,mdss-dsi-dispparam-cold-command-state",
++	"qcom,mdss-dsi-dispparam-papermode-command-state",
++	"qcom,mdss-dsi-dispparam-papermode1-command-state",
++	"qcom,mdss-dsi-dispparam-papermode2-command-state",
++	"qcom,mdss-dsi-dispparam-papermode3-command-state",
++	"qcom,mdss-dsi-dispparam-papermode4-command-state",
++	"qcom,mdss-dsi-dispparam-papermode5-command-state",
++	"qcom,mdss-dsi-dispparam-papermode6-command-state",
++	"qcom,mdss-dsi-dispparam-papermode7-command-state",
++	"qcom,mdss-dsi-dispparam-normal1-command-state",
++	"qcom,mdss-dsi-dispparam-normal2-command-state",
++	"qcom,mdss-dsi-dispparam-srgb-command-state",
++	"qcom,mdss-dsi-dispparam-ceon-command-state",
++	"qcom,mdss-dsi-dispparam-ceoff-command-state",
++	"qcom,mdss-dsi-dispparam-cabcuion-command-state",
++	"qcom,mdss-dsi-dispparam-cabcstillon-command-state",
++	"qcom,mdss-dsi-dispparam-cabcmovieon-command-state",
++	"qcom,mdss-dsi-dispparam-cabcoff-command-state",
++	"qcom,mdss-dsi-dispparam-skince-cabcuion-command-state",
++	"qcom,mdss-dsi-dispparam-skince-cabcstillon-command-state",
++	"qcom,mdss-dsi-dispparam-skince-cabcmovieon-command-state",
++	"qcom,mdss-dsi-dispparam-skince-cabcoff-command-state",
++	"qcom,mdss-dsi-dispparam-dimmingon-command-state",
++	"qcom,mdss-dsi-dispparam-dimmingoff-command-state",
++	"qcom,mdss-dsi-dispparam-acl-off-command-state",
++	"qcom,mdss-dsi-dispparam-acl-l1-command-state",
++	"qcom,mdss-dsi-dispparam-acl-l2-command-state",
++	"qcom,mdss-dsi-dispparam-acl-l3-command-state",
++	"qcom,mdss-dsi-dispparam-hbm-on-command-state",
++	"qcom,mdss-dsi-dispparam-hbm-off-command-state",
++	"qcom,mdss-dsi-dispparam-hbm-fod-on-command-state",
++	"qcom,mdss-dsi-dispparam-hbm-fod-off-command-state",
++	"qcom,mdss-dsi-dispparam-hbm-fod2norm-command-state",
++	"qcom,mdss-dsi-displayoff-command-state",
++	"qcom,mdss-dsi-displayon-command-state",
++	"qcom,mdss-dsi-dispparam-xy-coordinate-command-state",
++	"qcom,mdss-dsi-read-brightness-command-state",
++	"qcom,mdss-dsi-dispparam-max-luminance-command-state",
++	"qcom,mdss-dsi-dispparam-max-luminance-valid-command-state",
+ 	"qcom,mdss-dsi-qsync-on-commands-state",
+ 	"qcom,mdss-dsi-qsync-off-commands-state",
+ 	"qcom,mdss-dsi-dispparam-lcd-hbm-l1-on-command-state",
+@@ -1808,6 +1906,8 @@ const char *cmd_set_state_map[DSI_CMD_SET_MAX] = {
+ 	"qcom,mdss-dsi-dispparam-cabcstillon-command-state",
+ 	"qcom,mdss-dsi-dispparam-cabcmovieon-command-state",
+ 	"qcom,mdss-dsi-dispparam-cabcoff-command-state",
++	"qcom,mdss-dsi-dispparam-crc-dcip3-on-command-state",
++	"qcom,mdss-dsi-dispparam-crc-off-command-state",
+ };
+ 
+ static int dsi_panel_get_cmd_pkt_count(const char *data, u32 length, u32 *cnt)
+@@ -3289,6 +3389,7 @@ static void dsi_panel_update_util(struct dsi_panel *panel,
+ 	utils->node = panel->panel_of_node;
+ }
+ 
++#define XY_COORDINATE_NUM    2
+ struct dsi_panel *dsi_panel_get(struct device *parent,
+ 				struct device_node *of_node,
+ 				struct device_node *parser_node,
+@@ -3299,6 +3400,8 @@ struct dsi_panel *dsi_panel_get(struct device *parent,
+ 	struct dsi_parser_utils *utils;
+ 	const char *panel_physical_type;
+ 	int rc = 0;
++	bool dispparam_enabled = false;
++	u32 xy_coordinate[XY_COORDINATE_NUM] = {0};
+ 
+ 	panel = kzalloc(sizeof(*panel), GFP_KERNEL);
+ 	if (!panel)
+@@ -3324,6 +3427,25 @@ struct dsi_panel *dsi_panel_get(struct device *parent,
+ 				"qcom,mdss-dsi-panel-physical-type", NULL);
+ 	if (panel_physical_type && !strcmp(panel_physical_type, "oled"))
+ 		panel->panel_type = DSI_DISPLAY_PANEL_TYPE_OLED;
++	dispparam_enabled = utils->read_bool(utils->data,
++				"qcom,dispparam-enabled");
++	if (dispparam_enabled) {
++		pr_info("[LCD]%s:%d Dispparam enabled.\n", __func__, __LINE__);
++		panel->dispparam_enabled = true;
++	} else {
++		pr_info("[LCD]%s:%d Dispparam disabled.\n", __func__, __LINE__);
++		panel->dispparam_enabled = false;
++	}
++	xy_coordinate[0] = 0x03;
++	xy_coordinate[1] = 0x03;
++	panel->xy_coordinate_cmds.cmds_rlen = xy_coordinate[0];
++	panel->xy_coordinate_cmds.valid_bits = xy_coordinate[1];
++	panel->xy_coordinate_cmds.enabled = true;
++	pr_info("0x%x 0x%x enabled:%d\n",
++		xy_coordinate[0], xy_coordinate[1], panel->xy_coordinate_cmds.enabled);
++	panel->max_luminance_cmds.cmds_rlen = 0x03;
++	panel->max_luminance_cmds.valid_bits = 0x04;
++	panel->max_luminance_cmds.enabled = true;
+ 
+ 	rc = dsi_panel_parse_host_config(panel);
+ 	if (rc) {
+@@ -3417,6 +3539,54 @@ void dsi_panel_put(struct dsi_panel *panel)
+ 	kfree(panel);
+ }
+ 
++static int dsi_display_write_panel(struct dsi_panel *panel,
++				struct dsi_panel_cmd_set *cmd_sets)
++{
++	int rc = 0, i = 0;
++	ssize_t len;
++	struct dsi_cmd_desc *cmds;
++	u32 count;
++	enum dsi_cmd_set_state state;
++	struct dsi_display_mode *mode;
++	const struct mipi_dsi_host_ops *ops = panel->host->ops;
++
++	if (!panel || !panel->cur_mode)
++		return -EINVAL;
++
++	mode = panel->cur_mode;
++
++	cmds = cmd_sets->cmds;
++	count = cmd_sets->count;
++	state = cmd_sets->state;
++
++	if (count == 0) {
++		pr_debug("[%s] No commands to be sent for state\n",
++			 panel->name);
++		goto error;
++	}
++
++	for (i = 0; i < count; i++) {
++		if (state == DSI_CMD_SET_STATE_LP)
++			cmds->msg.flags |= MIPI_DSI_MSG_USE_LPM;
++
++		if (cmds->last_command)
++			cmds->msg.flags |= MIPI_DSI_MSG_LASTCOMMAND;
++
++		len = ops->transfer(panel->host, &cmds->msg);//dsi_host_transfer,
++		if (len < 0) {
++			rc = len;
++			pr_err("failed to set cmds, rc=%d\n", rc);
++			goto error;
++		}
++		if (cmds->post_wait_ms)
++			usleep_range(cmds->post_wait_ms*1000,
++					((cmds->post_wait_ms*1000)+10));
++		cmds++;
++	}
++error:
++	return rc;
++}
++
+ int dsi_panel_drv_init(struct dsi_panel *panel,
+ 		       struct mipi_dsi_host *host)
+ {
+@@ -4231,6 +4401,308 @@ int dsi_panel_mode_switch_to_vid(struct dsi_panel *panel)
+ 	return rc;
+ }
+ 
++static void handle_dsi_read_data(struct dsi_panel *panel, struct dsi_read_config *read_config)
++{
++	int i = 0;
++	int param_nb = 0, write_len = 0;
++	u32 read_cnt = 0, bit_valide = 0;
++
++	u8 *pRead_data = panel->panel_read_data;
++	read_cnt = read_config->cmds_rlen;
++	bit_valide = read_config->valid_bits;
++
++	for (i = 0; i < read_cnt; i++) {
++		if ((bit_valide & 0x1) && ((pRead_data + 8) < (panel->panel_read_data + BUF_LEN_MAX))) {
++			write_len = scnprintf(pRead_data, 8, "p%d=%d", param_nb, read_config->rbuf[i]);
++			pRead_data += write_len;
++			param_nb ++;
++		}
++		bit_valide = bit_valide >> 1;
++	}
++	pr_info("read %s from panel\n", panel->panel_read_data);
++
++	return;
++}
++
++static int panel_disp_param_send_lock(struct dsi_panel *panel, int param)
++{
++	int rc = 0;
++	uint32_t temp = 0;
++	struct dsi_panel_cmd_set cmd_sets = {0};
++
++	mutex_lock(&panel->panel_lock);
++
++	if (!panel->panel_initialized) {
++		pr_err("[LCD] panel not ready!\n");
++		mutex_unlock(&panel->panel_lock);
++		return rc;
++	}
++
++	pr_debug("[LCD] param_type=%d\n", param);
++
++	temp = param & 0x0000000F;
++	switch (temp) {
++	case 0x1:
++		pr_info("warm\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_WARM);
++		break;
++	case 0x2:		/*normal*/
++		pr_info("normal\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_DEFAULT);
++		break;
++	case 0x3:		/*cold*/
++		pr_info("cold\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_COLD);
++		break;
++	case 0x5:
++		pr_info("paper mode\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_COLD);
++		break;
++	case 0x6:
++		pr_info("paper mode 1\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_PAPER1);
++		break;
++	case 0x7:
++		pr_info("paper mode 2\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_PAPER2);
++		break;
++	case 0x8:
++		pr_info("paper mode 3\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_PAPER3);
++		break;
++	case 0x9:
++		pr_info("paper mode 4\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_PAPER4);
++		break;
++	case 0xa:
++		pr_info("paper mode 5\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_PAPER5);
++		break;
++	case 0xb:
++		pr_info("paper mode 6\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_PAPER6);
++		break;
++	case 0xc:
++		pr_info("paper mode 7\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_PAPER7);
++		break;
++	case 0xe:
++		pr_info("read xy coordinate\n");
++
++		cmd_sets.cmds = panel->cur_mode->priv_info->cmd_sets[DSI_CMD_SET_READ_XY_COORDINATE].cmds;
++		if (panel->cur_mode->priv_info->cmd_sets[DSI_CMD_SET_READ_XY_COORDINATE].count)
++			cmd_sets.count = 1;
++		cmd_sets.state = panel->cur_mode->priv_info->cmd_sets[DSI_CMD_SET_READ_XY_COORDINATE].state;
++		rc = dsi_display_write_panel(panel, &cmd_sets);
++		if (rc) {
++			pr_err("[%s][%s] failed to send cmds, rc=%d\n", __func__, panel->name, rc);
++		} else {
++			panel->xy_coordinate_cmds.read_cmd = cmd_sets;
++			panel->xy_coordinate_cmds.read_cmd.cmds = &cmd_sets.cmds[1];
++			rc = dsi_display_read_panel(panel, &panel->xy_coordinate_cmds);
++			if (rc > 0)
++				handle_dsi_read_data(panel, &panel->xy_coordinate_cmds);
++		}
++		break;
++	case 0xf:
++		pr_info("read max luminance nit value\n");
++		cmd_sets.cmds = panel->cur_mode->priv_info->cmd_sets[DSI_CMD_SET_READ_XY_COORDINATE].cmds;
++		if (panel->cur_mode->priv_info->cmd_sets[DSI_CMD_SET_READ_XY_COORDINATE].count)
++			cmd_sets.count = 1;
++		cmd_sets.state = panel->cur_mode->priv_info->cmd_sets[DSI_CMD_SET_READ_XY_COORDINATE].state;
++		rc = dsi_display_write_panel(panel, &cmd_sets);
++		if (rc) {
++			pr_err("[%s][%s] failed to send cmds, rc=%d\n", __func__, panel->name, rc);
++		} else {
++			panel->max_luminance_cmds.read_cmd = cmd_sets;
++			panel->max_luminance_cmds.read_cmd.cmds = &cmd_sets.cmds[1];
++			rc = dsi_display_read_panel(panel, &panel->max_luminance_cmds);
++			if (rc > 0)
++				handle_dsi_read_data(panel, &panel->max_luminance_cmds);
++		}
++		break;
++	default:
++		break;
++	}
++
++	temp = param & 0x000000F0;
++	switch (temp) {
++	case 0x10:		/*ce on default*/
++		pr_info("ceon\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_CEON);
++		break;
++	case 0xF0:		/*ce off*/
++		pr_info("ceoff\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_CEOFF);
++		break;
++	default:
++		break;
++	}
++
++	temp = param & 0x00000F00;
++	switch (temp) {
++	case 0x100:
++		pr_info("cabcuion\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_CABCUION);
++		break;
++	case 0x200:
++		pr_info("cabcstillon\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_CABCSTILLON);
++		break;
++	case 0x300:
++		pr_info("cabcmovieon\n");
++		dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_CABCMOVIEON);
++		break;
++	case 0x400:
++		pr_info("cabcoff\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_CABCOFF);
++		break;
++	case 0x500:
++		pr_info("skince cabcuion\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_SKINCE_CABCUION);
++		break;
++	case 0x600:
++		pr_info("skince cabcstillon\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_SKINCE_CABCSTILLON);
++		break;
++	case 0x700:
++		pr_info("skince cabcmovieon\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_SKINCE_CABCMOVIEON);
++		break;
++	case 0x800:
++		pr_info("skince cabcoff\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_SKINCE_CABCOFF);
++		break;
++	default:
++		break;
++	}
++
++	temp = param & 0x0000F000;
++	switch (temp) {
++	case 0x1000:
++		pr_info("acl level 1\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_ACL_L1);
++		break;
++	case 0x2000:
++		pr_info("acl level 2\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_ACL_L2);
++		break;
++	case 0x3000:
++		pr_info("acl level 3\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_ACL_L3);
++		break;
++	case 0xF000:
++		pr_info("acl off\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_ACL_OFF);
++		break;
++	default:
++		break;
++	}
++
++	temp = param & 0x000F0000;
++	switch (temp) {
++	case 0x10000:
++		pr_info("hbm on\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_HBM_ON);
++		break;
++	case 0x20000:
++		pr_info("hbm fod on\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_HBM_FOD_ON);
++		break;
++	case 0x30000:
++		pr_info("hbm fod to normal mode\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_HBM_FOD2NORM);
++		break;
++	case 0xE0000:
++		pr_info("hbm fod off\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_HBM_FOD_OFF);
++		break;
++	case 0xF0000:
++		pr_info("hbm off\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_HBM_OFF);
++		break;
++	default:
++		break;
++	}
++
++	temp = param & 0x00F00000;
++	switch (temp) {
++	case 0x100000:
++		pr_info("normal mode1\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_NORMAL1);
++		break;
++	case 0x300000:
++		pr_info("sRGB\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DISP_SRGB);
++		break;
++	case 0x500000:
++		pr_info("doze hbm On\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DOZE_HBM);
++		break;
++	case 0x600000:
++		pr_info("doze lbm On\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_DOZE_LBM);
++		break;
++	case 0x700000:
++		pr_info("doze Off\n");
++		rc = dsi_panel_tx_cmd_set(panel, DSI_CMD_SET_NOLP);
++		break;
++
++	default:
++		break;
++	}
++
++	temp = param & 0xF0000000;
++	switch (temp) {
++	case DISPPARAM_DFPS_LEVEL1:
++		pr_info("DFPS:30fps\n");
++		panel->panel_max_frame_rate = false;
++		break;
++	case DISPPARAM_DFPS_LEVEL2:
++		pr_info("DFPS:45fps\n");
++		panel->panel_max_frame_rate = false;
++		break;
++	case DISPPARAM_DFPS_LEVEL3:
++		pr_info("DFPS:60fps\n");
++		panel->panel_max_frame_rate = false;
++		break;
++	case DISPPARAM_DFPS_LEVEL4:
++		pr_info("DFPS:90fps\n");
++		panel->panel_max_frame_rate = false;
++		break;
++	case DISPPARAM_DFPS_LEVEL5:
++		pr_info("DFPS:120fps\n");
++		panel->panel_max_frame_rate = true;
++		break;
++	default:
++		break;
++	}
++
++	mutex_unlock(&panel->panel_lock);
++	return rc;
++}
++
++int panel_disp_param_send(struct dsi_display *display, int param_type)
++{
++	int rc = 0;
++	struct dsi_panel *panel = NULL;
++	struct drm_device *drm_dev = NULL;
++
++	if (!display || !display->panel || !display->drm_dev) {
++		pr_err("invalid display/panel/drm_dev\n");
++		return -EINVAL;
++	}
++
++	panel = display->panel;
++	drm_dev = display->drm_dev;
++
++	if (!panel->dispparam_enabled)
++		return rc;
++
++	rc = panel_disp_param_send_lock(panel, param_type);
++	return rc;
++}
++
+ int dsi_panel_switch(struct dsi_panel *panel)
+ {
+ 	int rc = 0;
+diff --git a/drivers/gpu/drm/msm/dsi-staging/dsi_panel.h b/drivers/gpu/drm/msm/dsi-staging/dsi_panel.h
+index a094d813a269..730fa44dc5ea 100644
+--- a/drivers/gpu/drm/msm/dsi-staging/dsi_panel.h
++++ b/drivers/gpu/drm/msm/dsi-staging/dsi_panel.h
+@@ -36,6 +36,7 @@
+ #define DSI_CMD_PPS_SIZE 135
+ 
+ #define DSI_MODE_MAX 5
++#define BUF_LEN_MAX    256
+ 
+ enum dsi_panel_rotation {
+ 	DSI_PANEL_ROTATE_NONE = 0,
+@@ -168,6 +169,14 @@ struct drm_panel_esd_config {
+ 	u32 groups;
+ };
+ 
++struct dsi_read_config {
++	bool enabled;
++	struct dsi_panel_cmd_set read_cmd;
++	u32 cmds_rlen;
++	u32 valid_bits;
++	u8 rbuf[64];
++};
++
+ struct dsi_panel {
+ 	const char *name;
+ 	const char *type;
+@@ -212,6 +221,8 @@ struct dsi_panel {
+ 	bool te_using_watchdog_timer;
+ 	u32 qsync_min_fps;
+ 
++	bool dispparam_enabled;
++
+ 	char dsc_pps_cmd[DSI_CMD_PPS_SIZE];
+ 	enum dsi_dms_mode dms_mode;
+ 
+@@ -221,6 +232,11 @@ struct dsi_panel {
+ 
+ 	int hbm_mode;
+ 	int cabc_mode;
++
++	u8 panel_read_data[BUF_LEN_MAX];
++	struct dsi_read_config xy_coordinate_cmds;
++	struct dsi_read_config max_luminance_cmds;
++	bool panel_max_frame_rate;
+ };
+ 
+ static inline bool dsi_panel_ulps_feature_enabled(struct dsi_panel *panel)
+diff --git a/drivers/gpu/drm/msm/dsi-staging/dsi_panel_mi.h b/drivers/gpu/drm/msm/dsi-staging/dsi_panel_mi.h
+new file mode 100644
+index 000000000000..2433c11f4f9f
+--- /dev/null
++++ b/drivers/gpu/drm/msm/dsi-staging/dsi_panel_mi.h
+@@ -0,0 +1,123 @@
++/*
++ * Copyright (c) 2016-2018, The Linux Foundation. All rights reserved.
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 and
++ * only version 2 as published by the Free Software Foundation.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ */
++
++#ifndef _DSI_PANEL_MI_H_
++#define _DSI_PANEL_MI_H_
++
++#define DEFAULT_FOD_OFF_DIMMING_DELAY	170
++
++#define BACKLIGHT_PLUSE_THRESHOLD	0
++
++enum bkl_dimming_state {
++	STATE_NONE,
++	STATE_DIM_BLOCK,
++	STATE_DIM_RESTORE,
++	STATE_ALL
++};
++
++enum sre_switch_state {
++	SRE_LEVEL_01,
++	SRE_LEVEL_02,
++	SRE_LEVEL_12,
++	SRE_LEVEL_21,
++	SRE_LEVEL_10,
++	SRE_LEVEL_20
++};
++
++enum DISPPARAM_MODE {
++	DISPPARAM_WARM = 0x1,
++	DISPPARAM_DEFAULT = 0x2,
++	DISPPARAM_COLD = 0x3,
++	DISPPARAM_PAPERMODE8 = 0x5,
++	DISPPARAM_PAPERMODE1 = 0x6,
++	DISPPARAM_PAPERMODE2 = 0x7,
++	DISPPARAM_PAPERMODE3 = 0x8,
++	DISPPARAM_PAPERMODE4 = 0x9,
++	DISPPARAM_PAPERMODE5 = 0xA,
++	DISPPARAM_PAPERMODE6 = 0xB,
++	DISPPARAM_PAPERMODE7 = 0xC,
++	DISPPARAM_WHITEPOINT_XY = 0xE,
++	DISPPARAM_CE_ON = 0x10,
++        DISPPARAM_SRE_ON_L1 = 0x20,
++	DISPPARAM_SRE_ON_L2 = 0x30,
++	DISPPARAM_SRE_ON_L12 = 0x40,
++	DISPPARAM_SRE_ON_L21 = 0x50,
++	DISPPARAM_SRE_OFF_L10 = 0x60,
++	DISPPARAM_SRE_OFF_L20 = 0x70,
++	DISPPARAM_CE_OFF = 0xF0,
++	DISPPARAM_CABCUI_ON = 0x100,
++	DISPPARAM_CABCSTILL_ON = 0x200,
++	DISPPARAM_CABCMOVIE_ON = 0x300,
++	DISPPARAM_CABC_OFF = 0x400,
++	DISPPARAM_SKIN_CE_CABCUI_ON = 0x500,
++	DISPPARAM_SKIN_CE_CABCSTILL_ON = 0x600,
++	DISPPARAM_SKIN_CE_CABCMOVIE_ON = 0x700,
++	DISPPARAM_SKIN_CE_CABC_OFF = 0x800,
++	DISPPARAM_DIMMING_OFF = 0xE00,
++	DISPPARAM_DIMMING = 0xF00,
++	DISPPARAM_ACL_L1 = 0x1000,
++	DISPPARAM_ACL_L2 = 0x2000,
++	DISPPARAM_ACL_L3 = 0x3000,
++	DISPPARAM_ACL_OFF = 0xF000,
++	DISPPARAM_HBM_ON = 0x10000,
++	DISPPARAM_HBM_FOD_ON = 0x20000,
++	DISPPARAM_HBM_FOD2NORM = 0x30000,
++	DISPPARAM_DC_ON = 0x40000,
++	DISPPARAM_DC_OFF = 0x50000,
++	DISPPARAM_HBM_FOD_OFF = 0xE0000,
++	DISPPARAM_HBM_OFF = 0xF0000,
++	DISPPARAM_LCD_HBM_L1_ON = 0xB0000,
++	DISPPARAM_LCD_HBM_L2_ON = 0xC0000,
++	DISPPARAM_LCD_HBM_OFF = 0xA0000,
++	DISPPARAM_NORMALMODE1 = 0x100000,
++	DISPPARAM_P3 = 0x200000,
++	DISPPARAM_SRGB = 0x300000,
++	DISPPARAM_SKIN_CE = 0x400000,
++	DISPPARAM_SKIN_CE_OFF = 0x500000,
++	DISPPARAM_DOZE_BRIGHTNESS_HBM = 0x600000,
++	DISPPARAM_DOZE_BRIGHTNESS_LBM = 0x700000,
++	DISPPARAM_DOZE_OFF = 0x800000,
++	DISPPARAM_HBM_BACKLIGHT_RESEND = 0xA00000,
++	DISPPARAM_FOD_BACKLIGHT = 0xD00000,
++	DISPPARAM_CRC_OFF = 0xF00000,
++	DISPPARAM_FOD_BACKLIGHT_ON = 0x1000000,
++	DISPPARAM_FOD_BACKLIGHT_OFF = 0x2000000,
++	DISPPARAM_ELVSS_DIMMING_ON = 0x3000000,
++	DISPPARAM_ELVSS_DIMMING_OFF = 0x4000000,
++	DISPPARAM_ONE_PLUSE = 0x5000000,
++	DISPPARAM_FOUR_PLUSE = 0x6000000,
++	DISPPARAM_DEMURA_LEVEL02 = 0x7000000,
++	DISPPARAM_DEMURA_LEVEL08 = 0x8000000,
++	DISPPARAM_DEMURA_LEVEL0D = 0x9000000,
++	DISPPARAM_IDLE_ON = 0xA000000,
++	DISPPARAM_IDLE_OFF = 0xB000000,
++	DISPPARAM_DFPS_LEVEL1 = 0x10000000,
++	DISPPARAM_DFPS_LEVEL2 = 0x20000000,
++	DISPPARAM_DFPS_LEVEL3 = 0x30000000,
++	DISPPARAM_DFPS_LEVEL4 = 0x40000000,
++	DISPPARAM_DFPS_LEVEL5 = 0x50000000,
++	DISPPARAM_QSYNC_MIN_FPS_30HZ = 0x60000000,
++	DISPPARAM_QSYNC_MIN_FPS_40HZ = 0x70000000,
++	DISPPARAM_QSYNC_MIN_FPS_50HZ = 0x80000000,
++	DISPPARAM_QSYNC_MIN_FPS_60HZ = 0x90000000,
++	DISPPARAM_QSYNC_MIN_FPS_70HZ = 0xA0000000,
++	DISPPARAM_QSYNC_MIN_FPS_80HZ = 0xB0000000,
++	DISPPARAM_QSYNC_MIN_FPS_90HZ = 0xC0000000,
++	DISPPARAM_QSYNC_MIN_FPS_100HZ = 0xD0000000,
++	DISPPARAM_QSYNC_MIN_FPS_110HZ = 0xE0000000,
++};
++
++static int panel_disp_param_send_lock(struct dsi_panel *panel, int param);
++
++#endif /* _DSI_PANEL_MI_H_ */
+diff --git a/drivers/gpu/drm/msm/sde/sde_crtc.c b/drivers/gpu/drm/msm/sde/sde_crtc.c
+index da6d4cb242c9..a244beaf6b8a 100644
+--- a/drivers/gpu/drm/msm/sde/sde_crtc.c
++++ b/drivers/gpu/drm/msm/sde/sde_crtc.c
+@@ -42,6 +42,7 @@
+ #include "sde_power_handle.h"
+ #include "sde_core_perf.h"
+ #include "sde_trace.h"
++#include "dsi_drm.h"
+ 
+ #define SDE_PSTATES_MAX (SDE_STAGE_MAX * 4)
+ #define SDE_MULTIRECT_PLANE_MAX (SDE_STAGE_MAX * 2)
+@@ -52,12 +53,15 @@ struct sde_crtc_custom_events {
+ 			struct sde_irq_callback *irq);
+ };
+ 
++struct drm_crtc *gcrtc;
+ static int sde_crtc_power_interrupt_handler(struct drm_crtc *crtc_drm,
+ 	bool en, struct sde_irq_callback *ad_irq);
+ static int sde_crtc_idle_interrupt_handler(struct drm_crtc *crtc_drm,
+ 	bool en, struct sde_irq_callback *idle_irq);
+ static int sde_crtc_pm_event_handler(struct drm_crtc *crtc, bool en,
+ 		struct sde_irq_callback *noirq);
++static int sde_crtc_tp_event_handler(struct drm_crtc *crtc_drm,
++	bool en, struct sde_irq_callback *irq);
+ 
+ static struct sde_crtc_custom_events custom_events[] = {
+ 	{DRM_EVENT_AD_BACKLIGHT, sde_cp_ad_interrupt},
+@@ -65,6 +69,7 @@ static struct sde_crtc_custom_events custom_events[] = {
+ 	{DRM_EVENT_IDLE_NOTIFY, sde_crtc_idle_interrupt_handler},
+ 	{DRM_EVENT_HISTOGRAM, sde_cp_hist_interrupt},
+ 	{DRM_EVENT_SDE_POWER, sde_crtc_pm_event_handler},
++	{DRM_EVENT_TOUCH, sde_crtc_tp_event_handler},
+ };
+ 
+ /* default input fence timeout, in ms */
+@@ -95,6 +100,7 @@ static struct sde_crtc_custom_events custom_events[] = {
+ /* default line padding ratio limitation */
+ #define MAX_VPADDING_RATIO_M		63
+ #define MAX_VPADDING_RATIO_N		15
++#define IDLE_TIMEOUT_DEFAULT		200
+ 
+ static inline struct sde_kms *_sde_crtc_get_kms(struct drm_crtc *crtc)
+ {
+@@ -3861,6 +3867,7 @@ static void sde_crtc_atomic_flush(struct drm_crtc *crtc,
+ 	struct sde_crtc_state *cstate;
+ 	struct sde_kms *sde_kms;
+ 	int idle_time = 0;
++	static int idle_time_enable = false;
+ 
+ 	if (!crtc || !crtc->dev || !crtc->dev->dev_private) {
+ 		SDE_ERROR("invalid crtc\n");
+@@ -3899,6 +3906,14 @@ static void sde_crtc_atomic_flush(struct drm_crtc *crtc,
+ 	event_thread = &priv->event_thread[crtc->index];
+ 	idle_time = sde_crtc_get_property(cstate, CRTC_PROP_IDLE_TIMEOUT);
+ 
++	if (!idle_time && idle_time_enable) {
++		idle_time = IDLE_TIMEOUT_DEFAULT;
++		idle_time_enable = false;
++	}
++	else {
++		idle_time_enable = true;
++	}
++
+ 	/*
+ 	 * If no mixers has been allocated in sde_crtc_atomic_check(),
+ 	 * it means we are trying to flush a CRTC whose state is disabled:
+@@ -3953,6 +3968,8 @@ static void sde_crtc_atomic_flush(struct drm_crtc *crtc,
+ 		sde_plane_flush(plane);
+ 	}
+ 
++	gcrtc = crtc;
++
+ 	/* Kickoff will be scheduled by outer layer */
+ 	SDE_ATRACE_END("sde_crtc_atomic_flush");
+ }
+@@ -6897,6 +6914,37 @@ static void __sde_crtc_early_wakeup_work(struct kthread_work *work)
+ 	sde_kms_trigger_early_wakeup(sde_kms, crtc);
+ }
+ 
++void sde_crtc_touch_notify(void)
++{
++	int ret = 0;
++	struct drm_event event;
++	struct dsi_bridge *c_bridge = NULL;
++	struct dsi_display *dsi_display = NULL;
++	struct drm_encoder *encoder = NULL;
++
++	if (gcrtc) {
++		list_for_each_entry(encoder, &gcrtc->dev->mode_config.encoder_list, head) {
++			if (encoder->crtc != gcrtc)
++				continue;
++
++			c_bridge = container_of(encoder->bridge, struct dsi_bridge, base);
++			if (c_bridge)
++				dsi_display = c_bridge->display;
++			break;
++		}
++
++		if (dsi_display && dsi_display->is_prim_display && dsi_display->panel
++			&& !dsi_display->panel->panel_max_frame_rate) {
++				event.type = DRM_EVENT_TOUCH;
++				event.length = sizeof(u32);
++				msm_mode_object_event_notify(&gcrtc->base, gcrtc->dev,
++					&event, (u8 *)&ret);
++			gcrtc = NULL;
++		}
++	}
++}
++EXPORT_SYMBOL(sde_crtc_touch_notify);
++
+ /* initialize crtc */
+ struct drm_crtc *sde_crtc_init(struct drm_device *dev, struct drm_plane *plane)
+ {
+@@ -7208,6 +7256,12 @@ static int sde_crtc_idle_interrupt_handler(struct drm_crtc *crtc_drm,
+ 	return 0;
+ }
+ 
++static int sde_crtc_tp_event_handler(struct drm_crtc *crtc_drm,
++	bool en, struct sde_irq_callback *irq)
++{
++	return 0;
++}
++
+ /**
+  * sde_crtc_update_cont_splash_settings - update mixer settings
+  *	and initial clk during device bootup for cont_splash use case
+diff --git a/drivers/input/input.c b/drivers/input/input.c
+index 85e9c9649da8..d3fc7908733d 100644
+--- a/drivers/input/input.c
++++ b/drivers/input/input.c
+@@ -61,6 +61,7 @@ static const unsigned int input_max_code[EV_CNT] = {
+ 	[EV_FF] = FF_MAX,
+ };
+ 
++void sde_crtc_touch_notify(void);
+ static inline int is_event_supported(unsigned int code,
+ 				     unsigned long *bm, unsigned int max)
+ {
+@@ -446,6 +447,7 @@ void input_event(struct input_dev *dev,
+ 		spin_lock_irqsave(&dev->event_lock, flags);
+ 		input_handle_event(dev, type, code, value);
+ 		spin_unlock_irqrestore(&dev->event_lock, flags);
++		sde_crtc_touch_notify();
+ 	}
+ }
+ EXPORT_SYMBOL(input_event);
+diff --git a/include/drm/drm_bridge.h b/include/drm/drm_bridge.h
+index e6eb3b0b6a9f..571d5b3caad7 100644
+--- a/include/drm/drm_bridge.h
++++ b/include/drm/drm_bridge.h
+@@ -236,6 +236,9 @@ struct drm_bridge_funcs {
+ 	 * The enable callback is optional.
+ 	 */
+ 	void (*enable)(struct drm_bridge *bridge);
++	void (*disp_param_set)(struct drm_bridge *bridge, int cmd);
++	ssize_t (*disp_param_get)(struct drm_bridge *bridge, char *buf);
++	int (*disp_get_panel_info)(struct drm_bridge *bridge, char *name);
+ };
+ 
+ /**
+diff --git a/include/uapi/drm/msm_drm.h b/include/uapi/drm/msm_drm.h
+index 07d30b3de6a9..cf25a3740d5f 100644
+--- a/include/uapi/drm/msm_drm.h
++++ b/include/uapi/drm/msm_drm.h
+@@ -397,6 +397,7 @@ struct drm_msm_power_ctrl {
+ #define DRM_EVENT_IDLE_NOTIFY 0x80000005
+ #define DRM_EVENT_PANEL_DEAD 0x80000006 /* ESD event */
+ #define DRM_EVENT_SDE_HW_RECOVERY 0X80000007
++#define DRM_EVENT_TOUCH 0x8000000F
+ 
+ #define DRM_IOCTL_MSM_GET_PARAM        DRM_IOWR(DRM_COMMAND_BASE + DRM_MSM_GET_PARAM, struct drm_msm_param)
+ #define DRM_IOCTL_MSM_GEM_NEW          DRM_IOWR(DRM_COMMAND_BASE + DRM_MSM_GEM_NEW, struct drm_msm_gem_new)
