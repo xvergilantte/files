@@ -1,0 +1,306 @@
+From ccaa5c512f61fa9a55c1ff6e796caf268582106a Mon Sep 17 00:00:00 2001
+From: vergilantte <xvergilantte@gmail.com>
+Date: Thu, 16 Jul 2026 11:02:43 +0700
+Subject: [PATCH] scope-minimized manual hooks v2.2
+
+This refactors original KSU hooks to replace deep kernel function hooks with targeted hooks.
+This backports KernelSU pr#1657 and having pr#2084 elements (32-bit sucompat).
+It reduces the scope of kernel function interception and still maintains full fucntionality.
+
+This commit is a squash of the following:
+*       fs/exec: do_execve: ksu_handle_execveat hook
+*       fs/exec: compat_do_execve: ksu_handle_execveat hook
+        fs/open: sys_faccessat: ksu_handle_faccessat hook
+*       fs/stat: sys_newfstatat: ksu_handle_stat hook
+*       fs/stat: sys_fstatat64: ksu_handle_stat hook
+*       fs/stat: sys_newfstat: ksu_handle_newfstat_ret hook
+*       fs/stat: sys_fstat64: ksu_handle_fstat64_ret hook
+        fs/read_write: sys_read: ksu_handle_sys_read hook
+        kernel/reboot: sys_reboot: ksu_handle_sys_reboot hook
+        security/selinux/avc: slow_avc_audit: ksu_slow_avc_audit hook
+        security/selinux/selinuxfs: selinux_transaction_write: ksu_sel_write_context hook
+        security/selinux/hooks: selinux_setprocattr: ksu_hide_setprocattr hook
+
+references: Official manual hooks, KernelSU pr#1657, pr#2084, scope-minimized manual hooks v2.2 #5
+        https://kernelsu.org/guide/how-to-integrate-for-non-gki.html
+        tiann/KernelSU#1657
+        tiann/KernelSU#2084
+        backslashxx/KernelSU#5
+
+Co-authored-by: backslashxx <118538522+backslashxx@users.noreply.github.com>
+Signed-off-by: vergilantte <xvergilantte@gmail.com>
+---
+ fs/exec.c                    | 12 ++++++++++++
+ fs/open.c                    | 10 ++++++++++
+ fs/read_write.c              | 10 ++++++++++
+ fs/stat.c                    | 25 +++++++++++++++++++++++++
+ kernel/reboot.c              |  8 ++++++++
+ security/selinux/avc.c       |  7 +++++++
+ security/selinux/hooks.c     |  8 ++++++++
+ security/selinux/selinuxfs.c |  8 ++++++++
+ 8 files changed, 88 insertions(+)
+
+diff --git a/fs/exec.c b/fs/exec.c
+index 44780238beb0..3a71b9d1f067 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1971,12 +1971,21 @@ int do_execve_file(struct file *file, void *__argv, void *__envp)
+ 	return __do_execve_file(AT_FDCWD, NULL, argv, envp, 0, file);
+ }
+ 
++#ifdef CONFIG_KSU
++__attribute__((hot))
++extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
++				void *argv, void *envp, int *flags);
++#endif
++
+ int do_execve(struct filename *filename,
+ 	const char __user *const __user *__argv,
+ 	const char __user *const __user *__envp)
+ {
+ 	struct user_arg_ptr argv = { .ptr.native = __argv };
+ 	struct user_arg_ptr envp = { .ptr.native = __envp };
++#ifdef CONFIG_KSU
++	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
++#endif
+ 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ }
+ 
+@@ -2004,6 +2013,9 @@ static int compat_do_execve(struct filename *filename,
+ 		.is_compat = true,
+ 		.ptr.compat = __envp,
+ 	};
++#ifdef CONFIG_KSU // 32-bit ksud and 32-on-64 support
++	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
++#endif
+ 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ }
+ 
+diff --git a/fs/open.c b/fs/open.c
+index c21cf8224d79..f8893b0e9225 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -354,6 +354,12 @@ SYSCALL_DEFINE4(fallocate, int, fd, int, mode, loff_t, offset, loff_t, len)
+ 	return error;
+ }
+ 
++#ifdef CONFIG_KSU
++__attribute__((hot)) 
++extern int ksu_handle_faccessat(int *dfd, const char __user **filename_user,
++				int *mode, int *flags);
++#endif
++
+ /*
+  * access() needs to use the real uid/gid, not the effective uid/gid.
+  * We do this by temporarily clearing all FS-related capabilities and
+@@ -369,6 +375,10 @@ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+ 	int res;
+ 	unsigned int lookup_flags = LOOKUP_FOLLOW;
+ 
++#ifdef CONFIG_KSU
++	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
++#endif
++
+ 	if (mode & ~S_IRWXO)	/* where's F_OK, X_OK, W_OK, R_OK? */
+ 		return -EINVAL;
+ 
+diff --git a/fs/read_write.c b/fs/read_write.c
+index 0da6e4f19d7f..045f42acd80a 100644
+--- a/fs/read_write.c
++++ b/fs/read_write.c
+@@ -568,11 +568,21 @@ static inline void file_pos_write(struct file *file, loff_t pos)
+ 		file->f_pos = pos;
+ }
+ 
++#ifdef CONFIG_KSU
++extern bool ksu_vfs_read_hook __read_mostly;
++extern __attribute__((cold)) int ksu_handle_sys_read(unsigned int fd,
++				char __user **buf_ptr, size_t *count_ptr);
++#endif
++
+ SYSCALL_DEFINE3(read, unsigned int, fd, char __user *, buf, size_t, count)
+ {
+ 	struct fd f = fdget_pos(fd);
+ 	ssize_t ret = -EBADF;
+ 
++#ifdef CONFIG_KSU
++	if (unlikely(ksu_vfs_read_hook)) 
++		ksu_handle_sys_read(fd, &buf, &count);
++#endif
+ 	if (f.file) {
+ 		loff_t pos = file_pos_read(f.file);
+ 		ret = vfs_read(f.file, buf, count, &pos);
+diff --git a/fs/stat.c b/fs/stat.c
+index 0fda4b6b8fb2..2244f61a2707 100644
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -353,6 +353,12 @@ SYSCALL_DEFINE2(newlstat, const char __user *, filename,
+ 	return cp_new_stat(&stat, statbuf);
+ }
+ 
++#ifdef CONFIG_KSU
++__attribute__((hot)) 
++extern int ksu_handle_stat(int *dfd, const char __user **filename_user,
++				int *flags);
++#endif
++
+ #if !defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_SYS_NEWFSTATAT)
+ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 		struct stat __user *, statbuf, int, flag)
+@@ -360,6 +366,9 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#ifdef CONFIG_KSU
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+@@ -367,6 +376,13 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ }
+ #endif
+ 
++#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)
++extern void ksu_handle_newfstat_ret(unsigned int *fd, struct stat __user **statbuf_ptr);
++#if defined(__ARCH_WANT_STAT64) || defined(__ARCH_WANT_COMPAT_STAT64)
++extern void ksu_handle_fstat64_ret(unsigned long *fd, struct stat64 __user **statbuf_ptr); // for 32-bit
++#endif
++#endif
++
+ SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+ {
+ 	struct kstat stat;
+@@ -375,6 +391,9 @@ SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+ 	if (!error)
+ 		error = cp_new_stat(&stat, statbuf);
+ 
++#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)
++	ksu_handle_newfstat_ret(&fd, &statbuf);
++#endif
+ 	return error;
+ }
+ 
+@@ -495,6 +514,9 @@ SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
+ 	if (!error)
+ 		error = cp_new_stat64(&stat, statbuf);
+ 
++#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD) // for 32-bit
++	ksu_handle_fstat64_ret(&fd, &statbuf);
++#endif
+ 	return error;
+ }
+ 
+@@ -504,6 +526,9 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#ifdef CONFIG_KSU // 32-bit su
++	ksu_handle_stat(&dfd, &filename, &flag); 
++#endif
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+diff --git a/kernel/reboot.c b/kernel/reboot.c
+index e40e52c55d44..aef3e368f6e3 100644
+--- a/kernel/reboot.c
++++ b/kernel/reboot.c
+@@ -277,6 +277,11 @@ static DEFINE_MUTEX(reboot_mutex);
+  *
+  * reboot doesn't sync: do that yourself before calling this.
+  */
++ 
++#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)
++extern int ksu_handle_sys_reboot(int magic1, int magic2, unsigned int cmd, void __user **arg);
++#endif
++ 
+ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 		void __user *, arg)
+ {
+@@ -284,6 +289,9 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 	char buffer[256];
+ 	int ret = 0;
+ 
++#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)
++	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
++#endif
+ 	/* We only trust the superuser with rebooting the system. */
+ 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
+ 		return -EPERM;
+diff --git a/security/selinux/avc.c b/security/selinux/avc.c
+index af31e5588605..7f0e66b1d944 100644
+--- a/security/selinux/avc.c
++++ b/security/selinux/avc.c
+@@ -762,6 +762,10 @@ static void avc_audit_post_callback(struct audit_buffer *ab, void *a)
+ 	}
+ }
+ 
++#if defined(CONFIG_KSU) && !defined(CONFIG_KPROBES)
++extern void ksu_slow_avc_audit(u32 *tsid);
++#endif
++
+ /* This is the slow part of avc audit with big stack footprint */
+ noinline int slow_avc_audit(struct selinux_state *state,
+ 			    u32 ssid, u32 tsid, u16 tclass,
+@@ -772,6 +776,9 @@ noinline int slow_avc_audit(struct selinux_state *state,
+ 	struct common_audit_data stack_data;
+ 	struct selinux_audit_data sad;
+ 
++#if defined(CONFIG_KSU) && !defined(CONFIG_KPROBES)
++	ksu_slow_avc_audit(&tsid);
++#endif
+ 	if (!a) {
+ 		a = &stack_data;
+ 		a->type = LSM_AUDIT_DATA_NONE;
+diff --git a/security/selinux/hooks.c b/security/selinux/hooks.c
+index 99f17164cc83..0dbaa4a5a66f 100644
+--- a/security/selinux/hooks.c
++++ b/security/selinux/hooks.c
+@@ -6142,6 +6142,10 @@ static int selinux_getprocattr(struct task_struct *p,
+ 	return error;
+ }
+ 
++#ifdef CONFIG_KSU
++extern int ksu_hide_setprocattr(const char *name, void *value, size_t size);
++#endif
++
+ static int selinux_setprocattr(const char *name, void *value, size_t size)
+ {
+ 	struct task_security_struct *tsec;
+@@ -6150,6 +6154,10 @@ static int selinux_setprocattr(const char *name, void *value, size_t size)
+ 	int error;
+ 	char *str = value;
+ 
++#ifdef CONFIG_KSU
++	ksu_hide_setprocattr(name, value, size);
++#endif
++
+ 	/*
+ 	 * Basic control over ability to set these attributes at all.
+ 	 */
+diff --git a/security/selinux/selinuxfs.c b/security/selinux/selinuxfs.c
+index c09d5192ba48..1edd375e521b 100644
+--- a/security/selinux/selinuxfs.c
++++ b/security/selinux/selinuxfs.c
+@@ -791,6 +791,10 @@ static ssize_t (*const write_op[])(struct file *, char *, size_t) = {
+ 	[SEL_CONTEXT] = sel_write_context,
+ };
+ 
++#if defined(CONFIG_KSU) && !defined(CONFIG_KPROBES)
++extern void ksu_sel_write_context(struct file **file, char **buf, size_t *size);
++#endif
++
+ static ssize_t selinux_transaction_write(struct file *file, const char __user *buf, size_t size, loff_t *pos)
+ {
+ 	ino_t ino = file_inode(file)->i_ino;
+@@ -804,6 +808,10 @@ static ssize_t selinux_transaction_write(struct file *file, const char __user *b
+ 	if (IS_ERR(data))
+ 		return PTR_ERR(data);
+ 
++#if defined(CONFIG_KSU) && !defined(CONFIG_KPROBES)
++	ksu_sel_write_context(&file, &data, &size);
++#endif
++
+ 	rv = write_op[ino](file, data, size);
+ 	if (rv > 0) {
+ 		simple_transaction_set(file, rv);
