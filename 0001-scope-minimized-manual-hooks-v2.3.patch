@@ -1,0 +1,141 @@
+From 4d6181eba9158f3f740d2c71568effd072bd6f44 Mon Sep 17 00:00:00 2001
+From: vergilantte <xvergilantte@gmail.com>
+Date: Thu, 20 Aug 2026 14:03:01 +0000
+Subject: [PATCH] scope-minimized manual hooks v2.3
+
+This refactors original KSU hooks to replace deep kernel function hooks with targeted hooks.
+This backports KernelSU pr#1657 and having pr#2084 elements (32-bit sucompat).
+It reduces the scope of kernel function interception and still maintains full fucntionality.
+
+This commit is a squash of the following:
+        fs/exec: __do_execve_file: ksu_handle_execveat hook
+        fs/open: sys_faccessat: ksu_handle_faccessat hook
+*       fs/stat: sys_newfstatat: ksu_handle_stat hook
+*       fs/stat: sys_fstatat64: ksu_handle_stat hook
+*       fs/stat: sys_newfstat: ksu_handle_newfstat_ret hook
+*       fs/stat: sys_fstat64: ksu_handle_fstat64_ret hook
+        kernel/reboot: sys_reboot: ksu_handle_sys_reboot hook
+
+references: Official manual hooks, KernelSU pr#1657, pr#2084, scope-minimized manual hooks v2.3 #5
+        https://kernelsu.org/guide/how-to-integrate-for-non-gki.html
+        tiann/KernelSU#1657
+        tiann/KernelSU#2084
+        backslashxx/KernelSU#5
+
+Co-authored-by: backslashxx <118538522+backslashxx@users.noreply.github.com>
+Signed-off-by: vergilantte <xvergilantte@gmail.com>
+---
+ fs/exec.c       |  5 +++++
+ fs/open.c       |  4 ++++
+ fs/stat.c       | 26 ++++++++++++++++++++++++++
+ kernel/reboot.c |  5 +++++
+ 4 files changed, 40 insertions(+)
+
+diff --git a/fs/exec.c b/fs/exec.c
+index 44780238beb0..ca47ed6130a6 100644
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1780,6 +1780,11 @@ static int __do_execve_file(int fd, struct filename *filename,
+ 	struct files_struct *displaced;
+ 	int retval;
+ 
++#ifdef CONFIG_KSU
++	extern int ksu_handle_execveat(int *, struct filename **, void *, void *, int *);
++	ksu_handle_execveat(&fd, &filename, &argv, &envp, &flags);
++#endif
++
+ 	if (IS_ERR(filename))
+ 		return PTR_ERR(filename);
+ 
+diff --git a/fs/open.c b/fs/open.c
+index 64a9fbc16053..0764552faa0b 100644
+--- a/fs/open.c
++++ b/fs/open.c
+@@ -484,6 +484,10 @@ long do_faccessat(int dfd, const char __user *filename, int mode, int flags)
+ 
+ SYSCALL_DEFINE3(faccessat, int, dfd, const char __user *, filename, int, mode)
+ {
++#ifdef CONFIG_KSU
++	extern int ksu_handle_faccessat(int *, const char __user **, int *, int *);
++	ksu_handle_faccessat(&dfd, &filename, &mode, NULL);
++#endif
+ 	return do_faccessat(dfd, filename, mode, 0);
+ }
+ 
+diff --git a/fs/stat.c b/fs/stat.c
+index 9712e13b7274..75390fdb8be1 100644
+--- a/fs/stat.c
++++ b/fs/stat.c
+@@ -371,6 +371,11 @@ SYSCALL_DEFINE4(newfstatat, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#ifdef CONFIG_KSU
++	extern int ksu_handle_stat(int *, const char __user **, int *);
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
++
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+@@ -386,6 +391,14 @@ SYSCALL_DEFINE2(newfstat, unsigned int, fd, struct stat __user *, statbuf)
+ 	if (!error)
+ 		error = cp_new_stat(&stat, statbuf);
+ 
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
++#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)
++	extern void ksu_handle_newfstat_ret(unsigned int *, struct stat __user **);
++	ksu_handle_newfstat_ret(&fd, &statbuf);
++#endif
++#pragma GCC diagnostic pop
++
+ 	return error;
+ }
+ 
+@@ -506,6 +519,14 @@ SYSCALL_DEFINE2(fstat64, unsigned long, fd, struct stat64 __user *, statbuf)
+ 	if (!error)
+ 		error = cp_new_stat64(&stat, statbuf);
+ 
++#pragma GCC diagnostic push
++#pragma GCC diagnostic ignored "-Wdeclaration-after-statement"
++#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD) // for 32-bit
++	extern void ksu_handle_fstat64_ret(unsigned long *, struct stat64 __user **);
++	ksu_handle_fstat64_ret(&fd, &statbuf);
++#endif
++#pragma GCC diagnostic pop
++
+ 	return error;
+ }
+ 
+@@ -515,6 +536,11 @@ SYSCALL_DEFINE4(fstatat64, int, dfd, const char __user *, filename,
+ 	struct kstat stat;
+ 	int error;
+ 
++#ifdef CONFIG_KSU // for 32-bit
++	extern int ksu_handle_stat(int *, const char __user **, int *);
++	ksu_handle_stat(&dfd, &filename, &flag);
++#endif
++
+ 	error = vfs_fstatat(dfd, filename, &stat, flag);
+ 	if (error)
+ 		return error;
+diff --git a/kernel/reboot.c b/kernel/reboot.c
+index e40e52c55d44..5aeff92f52fe 100644
+--- a/kernel/reboot.c
++++ b/kernel/reboot.c
+@@ -284,6 +284,11 @@ SYSCALL_DEFINE4(reboot, int, magic1, int, magic2, unsigned int, cmd,
+ 	char buffer[256];
+ 	int ret = 0;
+ 
++#if defined(CONFIG_KSU) && !defined(CONFIG_KSU_KPROBES_KSUD)
++	extern int ksu_handle_sys_reboot(int, int, unsigned int, void __user **);
++	ksu_handle_sys_reboot(magic1, magic2, cmd, &arg);
++#endif
++
+ 	/* We only trust the superuser with rebooting the system. */
+ 	if (!ns_capable(pid_ns->user_ns, CAP_SYS_BOOT))
+ 		return -EPERM;
+-- 
+2.43.0
+
